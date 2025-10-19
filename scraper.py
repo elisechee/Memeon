@@ -10,12 +10,13 @@ import time
 import re
 
 base_url = "https://knowyourmeme.com"
+csv_path = 'data/memes.csv'
 
 # PART 1: Setup folders
 memes = []  # List to store all meme data
 
 # PART 2: Scrape Pages (edit range for more/less data)
-for page_num in range(3, 51):  # Pages 1-5 (change range for more/less pages)
+for page_num in range(2, 3):  # Pages 1-5 (change range for more/less pages)
     print(f"\nScraping page {page_num}...")
     url = f"https://knowyourmeme.com/categories/meme/page/{page_num}?sort=chronological&status=confirmed"
     try:
@@ -59,10 +60,26 @@ for page_num in range(3, 51):  # Pages 1-5 (change range for more/less pages)
             print(f"  Scraping detail page: {meme_link}")
             year = "Unknown"
             origin = "Unknown"
+            type = "Unknown"
+            badge = "None"
             try:
                 det_resp = requests.get(meme_link, timeout=10)
                 det_soup = BeautifulSoup(det_resp.content, 'html.parser')
-
+                for dt in det_soup.select('dt'):
+                    if dt.get_text(strip=True).lower() == 'type:':
+                        type_dd = dt.find_next_sibling('dd')
+                        if type_dd:
+                            # print("    DEBUG Type found:", type_dd.get_text(strip=True))
+                            type = type_dd.get_text(strip=True)
+                        break
+                # print what is found at dt.get_text(strip=True).lower() == 'type:'
+                
+                for dt in det_soup.select('dt'):
+                    if dt.get_text(strip=True).lower() == 'badges:':
+                        badge_dd = dt.find_next_sibling('dd')
+                        if badge_dd:
+                            badge = badge_dd.get_text(strip=True)
+                        break
                 # Find Year: look for <dt>Year</dt> then following <dd>
                 for dt in det_soup.select('dt'):
                     if dt.get_text(strip=True) == 'Year':
@@ -102,6 +119,8 @@ for page_num in range(3, 51):  # Pages 1-5 (change range for more/less pages)
                 'name': meme_name,
                 'year': year,
                 'origin': origin,
+                'type': type,
+                'badge': badge,
                 'image_filename': image_filename,
                 'alt_description': alt_text,
                 'detail_url': meme_link
@@ -113,16 +132,93 @@ for page_num in range(3, 51):  # Pages 1-5 (change range for more/less pages)
     time.sleep(2)
 
 # Save as CSV
-old_df = pd.read_csv('data/memes.csv')
+# Ensure data directories exist
+os.makedirs('data', exist_ok=True)
+os.makedirs('data/images', exist_ok=True)
+
+# Try to read existing CSV, handle missing or empty file gracefully
+expected_columns = ['name', 'year', 'origin', 'type', 'badge', 'image_filename', 'alt_description', 'detail_url']
+try:
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+        old_df = pd.read_csv(csv_path)
+        # normalize column names
+        old_df.columns = old_df.columns.str.strip()
+    else:
+        # empty or missing file -> create empty DataFrame with expected columns
+        old_df = pd.DataFrame(columns=expected_columns)
+except pd.errors.EmptyDataError:
+    print("Warning: data/memes.csv exists but is empty or malformed. Creating a fresh DataFrame.")
+    old_df = pd.DataFrame(columns=expected_columns)
+
 new_df = pd.DataFrame(memes)
-combined_df = pd.concat([old_df, new_df], ignore_index=True)
 
-# Remove duplicates by unique meme property (like 'detail_url' or 'name'):
-combined_df = combined_df.drop_duplicates(subset=['detail_url'])
+# Ensure new_df has the same columns order (add missing expected columns)
+for c in expected_columns:
+    if c not in new_df.columns:
+        new_df[c] = ''
 
-combined_df.to_csv('data/memes.csv', index=False)
+# Normalize column names
+old_df.columns = old_df.columns.str.strip()
+new_df.columns = new_df.columns.str.strip()
 
-print("Done! See data/memes.csv and your images folder.")
+# Build a lookup for new rows by detail_url (preserve first occurrence per URL)
+new_lookup = {}
+for _, row in new_df.iterrows():
+    key = (row.get('detail_url') or '').strip()
+    if not key:
+        continue
+    if key not in new_lookup:
+        new_lookup[key] = row.to_dict()
+
+# Build set of existing detail_url values safely
+if 'detail_url' in old_df.columns:
+    existing_urls = set(old_df['detail_url'].fillna('').astype(str).str.strip())
+    existing_urls.discard('')
+else:
+    existing_urls = set()
+
+# Output rows: start with old rows in their existing order, merging in new values where meaningful
+output_rows = []
+for old_row in old_df.to_dict(orient='records'):
+    detail = (old_row.get('detail_url') or '').strip()
+    if not detail:
+        output_rows.append(old_row)
+        continue
+
+    if detail in new_lookup:
+        new_row = new_lookup[detail]
+        merged = dict(old_row)  # copy
+        # update selective fields only when new value is meaningful
+        for field in ['type', 'badge']:
+            new_val = (new_row.get(field) or '').strip()
+            old_val = (merged.get(field) or '').strip()
+            if new_val and new_val.lower() not in ('unknown', 'none'):
+                merged[field] = new_val
+        # update other meta fields if present in new row
+        for field in ['image_filename', 'alt_description', 'name', 'year', 'origin']:
+            new_val = (new_row.get(field) or '').strip()
+            if new_val:
+                merged[field] = new_val
+        output_rows.append(merged)
+    else:
+        output_rows.append(old_row)
+
+# Append truly new rows in the order they were scraped
+for _, new_row in new_df.iterrows():
+    detail = (new_row.get('detail_url') or '').strip()
+    if not detail:
+        # append rows without detail_url as they appear
+        output_rows.append({c: (new_row.get(c) or '') for c in expected_columns})
+        continue
+    if detail in existing_urls:
+        continue
+    output_rows.append({c: (new_row.get(c) or '') for c in expected_columns})
+
+# Write final CSV preserving chronological order (old rows remain in order; new rows appended)
+final_df = pd.DataFrame(output_rows, columns=expected_columns)
+final_df.to_csv(csv_path, index=False)
+
+print(f"Done! Wrote {len(final_df)} rows to {csv_path}. See data/images/ for images.")
 
 # # Preview first 5 memes
 # if len(memes) > 0:
