@@ -72,7 +72,7 @@ def merge_page_into_csv(page_rows, csv_path=csv_path):
 
 
 # PART 2: Scrape Pages (edit range for more/less data)
-for page_num in range(50, 101):  # Pages inclusive
+for page_num in range(300, 301):  # Pages inclusive
     print(f"\nScraping page {page_num}...")
     url = f"https://knowyourmeme.com/categories/meme/page/{page_num}?sort=chronological&status=confirmed"
     try:
